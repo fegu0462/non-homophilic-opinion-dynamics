@@ -1,55 +1,33 @@
-# Non-homophilic interactions and phase transitions in opinion dynamics
+# Code and data for the opinion-dynamics study
 
-This repository contains the code and pre-computed data used in the manuscript  
-**“Non-homophilic interactions and phase transitions in opinion dynamics”**  
-by Feng Gu and Eduardo G. Altmann.
+This repository contains three model modules and five notebooks.
 
-The repository provides Monte Carlo simulations of the coevolving opinion model,
-four-bin and 42-bin mean-field calculations, and the code used to generate the
-main trajectory and bifurcation figures in the manuscript.
+## Core modules
 
-## Repository structure
-
-- `notebooks/`: Jupyter notebooks used to reproduce the figures.
-- `src/`: Python source code for the Monte Carlo and mean-field models.
-- `exact_data_generation/`: scripts used to generate the 42-bin mean-field data.
-- `data/recomputed_exact/`: pre-computed data used by the plotting notebooks.
-- `figures/`: output directory for generated figures.
+- `src/monte_carlo.py`: microscopic Monte Carlo dynamics and all initial conditions.
+- `src/mean_field_4bin.py`: four-bin fixed points, stability, bifurcation detection, and plotting.
+- `src/mean_field_42bin.py`: validation and plotting of the 42-bin stability-scan and continuation data.
 
 ## Notebooks
 
-### Monte Carlo simulations
-
-- `01_trajectory_states_K40_final.ipynb`  
-  Generates representative trajectories and terminal opinion distributions for
-  the bimodal polarized, biased unimodal, and neutral unimodal states.
-
-- `02_three_states_K40_T50_complete.ipynb`  
-  Generates trajectories and terminal distributions for three coexisting states
-  reached from different initial conditions: bimodal polarized, biased unimodal,
-  and asymmetric bimodal polarized.
-
-### Mean-field calculations
-
-- `03_mean_field_42bin_exact_data_generation.ipynb`  
-  Recomputes the data for the three two-parameter bifurcation diagrams of the
-  42-bin mean-field model. This calculation can be computationally intensive.
-
-- `04_mean_field_42bin_plot_three_panels.ipynb`  
-  Reads the pre-computed 42-bin data and generates the three two-parameter
-  bifurcation diagrams. This notebook can be run without recomputing the data.
-
-- `05_mean_field_4bin_two_slices_full_reproduction.ipynb`  
-  Recomputes and plots the two one-parameter bifurcation diagrams of the
-  four-bin mean-field model.
+1. `01_trajectory_states_K40.ipynb`: three representative Monte Carlo states.
+2. `02_coexisting_states_K40_T50.ipynb`: coexisting states from different initial conditions.
+3. `03_check_42bin_mean_field_data.ipynb`: check all supplied 42-bin numerical data.
+4. `04_plot_42bin_parameter_planes.ipynb`: generate the three 42-bin parameter-plane panels.
+5. `05_compute_plot_4bin_bifurcation_slices.ipynb`: recompute and plot both four-bin slices.
 
 ## Installation
 
-The calculations were tested with Python 3.9.20.
-
-To create a suitable environment, run
+Python 3.9 or later is recommended.
 
 ```bash
-conda create -n opinion-dynamics python=3.9.20
-conda activate opinion-dynamics
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
+```
+
+Open the repository folder in JupyterLab or VS Code, select the same Python
+environment, and run a notebook from top to bottom. Generated figures are
+written to `figures/`.
+
+The 42-bin parameter planes use the numerical results in
+`data/recomputed_exact/`. The four-bin notebook recomputes its fixed points
+and bifurcations directly from the equations.
