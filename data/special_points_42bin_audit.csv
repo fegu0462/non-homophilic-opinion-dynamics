@@ -1,0 +1,7 @@
+panel,label,type,marker,x_parameter,x,y_parameter,y,criterion_1,criterion_2,higher_order,residual,status
+a,SNP,Saddle-node-pitchfork point,diamond,alpha2,0.14501538557835383,fs,0.7023613116879684,-9.429854206039131e-17,-2.619842576602929e-16,,2.619842576602929e-16,verified codimension-two point
+a,TP,Tricritical pitchfork point,circle,alpha2,0.1932732499,fs,0.7957070426,1.25298958e-06,-1.10540331,c3 approximately zero; c5 nonzero,2.1e-13,verified codimension-two point
+b,PC1,Pitchfork criticality-change point,triangle,alpha2,0.0512840372204349,dc,0.1218568339496851,-8.601030369696783e-12,,,3.0613126743362035e-07,c3 sign change only; not labelled tricritical
+b,PC2,Pitchfork criticality-change point,triangle,alpha2,0.026910241133774306,dc,0.9803735727220775,1.3414000812894677e-11,,,6.759550506280021e-08,c3 sign change only; not labelled tricritical
+c,TP,Tricritical pitchfork point,circle,alpha3,0.29864997977367064,fs,0.29291114777326577,-1.1786713676834962e-11,-34.98367004328587,c3=0; c5 nonzero,7.033487603010695e-07,verified tricritical pitchfork by reduced normal form
+c,SNP,Saddle-node-pitchfork point,diamond,alpha3,0.19727805214422528,fs,0.6371451629655437,-3.390009597243896e-18,-8.398892236076756e-17,,2.220446049250313e-16,verified codimension-two point
