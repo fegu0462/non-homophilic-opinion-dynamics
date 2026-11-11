@@ -1,4 +1,4 @@
-"""Plot the three 42-bin mean-field parameter planes.
+"""Compute and plot the three 42-bin mean-field parameter planes.
 
 Panels
 ------
@@ -6,9 +6,11 @@ Panels
 (b) (alpha2, dc), at fs=0.5 and alpha3=0;
 (c) (alpha3, fs), at dc=0.5 and alpha2=0.
 
-The numerical scan and pseudo-arclength continuation data are supplied in
-``data/recomputed_exact``.  This module checks those files and turns them into
-the three panels used in the paper.
+For immediate reproduction, the archived numerical scan and pseudo-arclength
+continuation data in ``data/recomputed_exact`` can be plotted directly.  The
+same module also contains the complete from-scratch route: the 42-dimensional
+mean-field equation, multistart fixed-point scan, analytic stability test,
+state classification, and pseudo-arclength continuation.
 """
 
 
@@ -16,6 +18,9 @@ from __future__ import annotations
 
 
 import csv
+
+
+import argparse
 
 
 import json
@@ -28,6 +33,9 @@ import pickle
 
 
 from collections import defaultdict
+
+
+from dataclasses import dataclass
 
 
 from pathlib import Path
@@ -75,6 +83,9 @@ from matplotlib.patches import FancyBboxPatch, Patch
 from scipy.interpolate import PchipInterpolator, RegularGridInterpolator, UnivariateSpline
 
 
+from scipy.optimize import least_squares
+
+
 from scipy.ndimage import distance_transform_edt, gaussian_filter
 
 
@@ -96,13 +107,13 @@ FIGURE_DIR = ROOT / "figures"
 FIGURE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-B_CUTOFF = float(os.environ.get("B_CUTOFF", "0.57"))
+B_CUTOFF = float(os.environ.get("B_CUTOFF", "0.56"))
 
 
 B_TAG = f"B{int(round(100 * B_CUTOFF)):03d}"
 
 
-BIMODALITY_MODE = os.environ.get("BIMODALITY_MODE", "population").strip().lower()
+BIMODALITY_MODE = os.environ.get("BIMODALITY_MODE", "sample_corrected").strip().lower()
 
 
 if BIMODALITY_MODE not in {"population", "sample_corrected"}:
@@ -112,7 +123,7 @@ if BIMODALITY_MODE not in {"population", "sample_corrected"}:
 MODE_SUFFIX = "_sample_corrected" if BIMODALITY_MODE == "sample_corrected" else ""
 
 
-STATE_MODE = os.environ.get("STATE_MODE", "four").strip().lower()
+STATE_MODE = os.environ.get("STATE_MODE", "three").strip().lower()
 
 
 if STATE_MODE not in {"four", "three"}:
@@ -125,7 +136,7 @@ STATE_TAG = "four_state" if STATE_MODE == "four" else "three_state"
 SHOW_BF_PREVIEW = os.environ.get("SHOW_BF_PREVIEW", "0") == "1"
 
 
-SEPARATE_C_NEAR_LINES = os.environ.get("SEPARATE_C_NEAR_LINES", "0") == "1"
+SEPARATE_C_NEAR_LINES = os.environ.get("SEPARATE_C_NEAR_LINES", "1") == "1"
 
 
 OUTPUT_SUFFIX = os.environ.get("OUTPUT_SUFFIX", "").strip().strip("_")
@@ -1586,3 +1597,823 @@ def style_axis(
         va="bottom",
     )
     ax.set_title(subtitle, fontsize=8.0, pad=7, y=1.01)
+
+
+# =============================================================================
+# From-scratch 42-bin calculation
+# =============================================================================
+
+# The plotting functions above reproduce the manuscript panels immediately from
+# the archived numerical data.  The functions below are the independent
+# calculation route: they start from the 42-dimensional mean-field equation,
+# find stable fixed points, evaluate the analytic Jacobian, classify the
+# attractors, and (optionally) continue critical curves by pseudo-arclength.
+
+
+@dataclass(frozen=True)
+class MF42Settings:
+    bins_per_side: int = 20
+    gamma: float = 4.0
+    sigma_stubborn: float = 0.8
+    sigma_nonstubborn: float = 0.1
+    stubborn_positive_share: float = 0.5
+    b_cutoff: float = 0.56
+    solution_tolerance: float = 3.0e-5
+    residual_tolerance: float = 2.0e-8
+    stability_margin: float = 2.0e-7
+    max_iterations: int = 60_000
+
+
+@dataclass(frozen=True)
+class MF42Parameters:
+    alpha2: float
+    alpha3: float
+    fs: float
+    dc: float
+
+
+@dataclass(frozen=True)
+class MF42Plane:
+    name: str
+    x_parameter: str
+    y_parameter: str
+    x_values: np.ndarray
+    y_values: np.ndarray
+    fixed: dict[str, float]
+
+    def parameters(self, x_value: float, y_value: float) -> MF42Parameters:
+        values = dict(self.fixed)
+        values[self.x_parameter] = float(x_value)
+        values[self.y_parameter] = float(y_value)
+        return MF42Parameters(**values)
+
+
+@dataclass
+class MF42Population:
+    eta: np.ndarray
+    sigma: np.ndarray
+    weights: np.ndarray
+
+    @property
+    def dimension(self) -> int:
+        return int(self.eta.size)
+
+
+MF42_DEFAULTS = MF42Settings()
+MF42_GENERATED_DIR = ROOT / "data" / "generated_42bin"
+MF42_GENERATED_FIGURE_DIR = FIGURE_DIR / "generated_42bin"
+
+
+def manuscript_planes_42bin(quick: bool = False) -> list[MF42Plane]:
+    """Return the three parameter planes used in the paper.
+
+    ``quick=True`` is a small end-to-end test.  ``quick=False`` uses the full
+    scan grids; it is computationally expensive because every point is a
+    multistart 42-dimensional fixed-point calculation.
+    """
+    if quick:
+        alpha2_a = np.linspace(0.0, 0.30, 5)
+        fs_a = np.linspace(0.20, 0.90, 5)
+        alpha2_b = np.linspace(0.0, 0.30, 5)
+        dc_b = np.linspace(0.0, 1.0, 5)
+        alpha3_c = np.linspace(0.0, 0.70, 5)
+        fs_c = np.linspace(0.20, 0.90, 5)
+    else:
+        # Panel (a) uses the same 81 x 181 grid as the archived scan.
+        alpha2_a = np.round(np.arange(0.0, 0.4001, 0.005), 12)
+        fs_a = np.round(np.arange(0.0, 0.9001, 0.005), 12)
+        alpha2_b = np.round(np.arange(0.0, 0.3001, 0.01), 12)
+        dc_b = np.round(np.arange(0.0, 1.0001, 0.01), 12)
+        alpha3_c = np.round(np.arange(0.0, 0.7001, 0.01), 12)
+        fs_c = np.round(np.arange(0.20, 0.9001, 0.01), 12)
+
+    return [
+        MF42Plane(
+            "panel_a_alpha2_fs",
+            "alpha2",
+            "fs",
+            alpha2_a,
+            fs_a,
+            {"alpha2": 0.0, "alpha3": 0.0, "fs": 0.5, "dc": 0.5},
+        ),
+        MF42Plane(
+            "panel_b_alpha2_dc",
+            "alpha2",
+            "dc",
+            alpha2_b,
+            dc_b,
+            {"alpha2": 0.0, "alpha3": 0.0, "fs": 0.5, "dc": 0.5},
+        ),
+        MF42Plane(
+            "panel_c_alpha3_fs",
+            "alpha3",
+            "fs",
+            alpha3_c,
+            fs_c,
+            {"alpha2": 0.0, "alpha3": 0.0, "fs": 0.5, "dc": 0.5},
+        ),
+    ]
+
+
+def make_population_42(
+    fs: float, settings: MF42Settings = MF42_DEFAULTS
+) -> MF42Population:
+    """Build the two stubborn groups and 40 non-stubborn eta bins."""
+    n = settings.bins_per_side
+    eta_positive = (np.arange(n) + 0.5) / n
+    eta_negative = -1.0 + (np.arange(n) + 0.5) / n
+    eta = np.concatenate(([1.0, -1.0], eta_positive, eta_negative))
+    sigma = np.concatenate(
+        ([settings.sigma_stubborn, settings.sigma_stubborn],
+         np.full(2 * n, settings.sigma_nonstubborn))
+    )
+    weights = np.concatenate(
+        ([fs * settings.stubborn_positive_share,
+          fs * (1.0 - settings.stubborn_positive_share)],
+         np.full(2 * n, (1.0 - fs) / (2.0 * n)))
+    )
+    return MF42Population(eta=eta, sigma=sigma, weights=weights)
+
+
+def mean_field_map_42(
+    state: np.ndarray,
+    parameters: MF42Parameters,
+    population: MF42Population | None = None,
+    settings: MF42Settings = MF42_DEFAULTS,
+    return_jacobian: bool = True,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Evaluate the 42-bin mean-field map and its analytic state Jacobian."""
+    x = np.asarray(state, dtype=float)
+    pop = population or make_population_42(parameters.fs, settings)
+    if x.shape != (pop.dimension,):
+        raise ValueError(f"Expected a {pop.dimension}-component state, got {x.shape}.")
+
+    difference = x[:, None] - x[None, :]
+    distance = np.abs(difference)
+    exponent = np.clip(settings.gamma * (distance - parameters.dc), -100.0, 100.0)
+    logistic = 1.0 / (1.0 + np.exp(exponent))
+    confidence = (1.0 + np.exp(-settings.gamma * parameters.dc)) * logistic
+
+    alpha1 = 1.0 - parameters.alpha2 - parameters.alpha3
+    if alpha1 < -1.0e-12:
+        raise ValueError("alpha2 + alpha3 must not exceed one.")
+    source_extremity = np.abs(x)[None, :]
+    receiver_extremity = np.abs(x)[:, None]
+    connection = (
+        alpha1 * confidence
+        + parameters.alpha2 * source_extremity
+        + parameters.alpha3 * receiver_extremity
+    )
+    denominator = connection @ pop.weights
+    if np.any(denominator <= 1.0e-14):
+        raise RuntimeError("The normalized interaction denominator reached zero.")
+    numerator = connection @ (pop.weights * x)
+    neighbour_mean = numerator / denominator
+    update = pop.sigma * pop.eta + (1.0 - pop.sigma) * neighbour_mean
+    if not return_jacobian:
+        return update, None
+
+    sign_difference = np.sign(difference)
+    dconfidence = (
+        -settings.gamma
+        * (1.0 + np.exp(-settings.gamma * parameters.dc))
+        * logistic
+        * (1.0 - logistic)
+    )
+    dconnection_receiver = (
+        alpha1 * dconfidence * sign_difference
+        + parameters.alpha3 * np.sign(x)[:, None]
+    )
+    dconnection_source = (
+        -alpha1 * dconfidence * sign_difference
+        + parameters.alpha2 * np.sign(x)[None, :]
+    )
+    ddenominator = dconnection_source * pop.weights[None, :]
+    dnumerator = pop.weights[None, :] * (
+        dconnection_source * x[None, :] + connection
+    )
+    diagonal = np.arange(x.size)
+    ddenominator[diagonal, diagonal] += dconnection_receiver @ pop.weights
+    dnumerator[diagonal, diagonal] += dconnection_receiver @ (pop.weights * x)
+    jacobian = (1.0 - pop.sigma)[:, None] * (
+        dnumerator * denominator[:, None]
+        - numerator[:, None] * ddenominator
+    ) / denominator[:, None] ** 2
+    return update, jacobian
+
+
+def reflect_state_42(state: np.ndarray) -> np.ndarray:
+    """Apply the exact opinion-sign/intrinsic-bias reflection symmetry."""
+    x = np.asarray(state, dtype=float)
+    n = (x.size - 2) // 2
+    reflected = np.empty_like(x)
+    reflected[0], reflected[1] = -x[1], -x[0]
+    reflected[2 : 2 + n] = -x[2 + n :][::-1]
+    reflected[2 + n :] = -x[2 : 2 + n][::-1]
+    return reflected
+
+
+def _append_distinct_42(
+    collection: list[np.ndarray], candidate: np.ndarray, tolerance: float
+) -> bool:
+    candidate = np.asarray(candidate, dtype=float)
+    if any(np.max(np.abs(candidate - old)) <= tolerance for old in collection):
+        return False
+    collection.append(candidate.copy())
+    return True
+
+
+def seed_bank_42(settings: MF42Settings = MF42_DEFAULTS) -> list[np.ndarray]:
+    """Deterministic seeds for bimodal, biased, neutral, and detached-bin states."""
+    n = settings.bins_per_side
+    seeds: list[np.ndarray] = []
+
+    def split(amplitude: float, shift: float = 0.0) -> np.ndarray:
+        return np.concatenate(
+            ([1.0, -1.0], np.full(n, amplitude + shift),
+             np.full(n, -amplitude + shift))
+        )
+
+    for amplitude in (0.02, 0.20, 0.50, 0.80, 0.95):
+        _append_distinct_42(seeds, split(amplitude), 1.0e-12)
+    for amplitude in (0.35, 0.65, 0.90):
+        for shift in (-0.04, -0.012, 0.012, 0.04):
+            _append_distinct_42(seeds, split(amplitude, shift), 1.0e-12)
+    for value in (-0.85, -0.55, -0.25, 0.0, 0.25, 0.55, 0.85):
+        seed = np.concatenate(([1.0, -1.0], np.full(2 * n, value)))
+        _append_distinct_42(seeds, seed, 1.0e-12)
+    eta_positive = (np.arange(n) + 0.5) / n
+    eta_negative = -1.0 + (np.arange(n) + 0.5) / n
+    eta_ns = np.concatenate((eta_positive, eta_negative))
+    for scale in (0.35, 0.70, 1.0):
+        seed = np.concatenate(([1.0, -1.0], scale * eta_ns))
+        _append_distinct_42(seeds, seed, 1.0e-12)
+    for amplitude in (0.50, 0.85):
+        for number in (1, 2, 4, 8):
+            positive_flip = split(amplitude)
+            positive_flip[2 : 2 + number] = -amplitude
+            negative_flip = split(amplitude)
+            negative_flip[-number:] = amplitude
+            _append_distinct_42(seeds, positive_flip, 1.0e-12)
+            _append_distinct_42(seeds, negative_flip, 1.0e-12)
+    return seeds
+
+
+def _iterate_seed_42(
+    seed: np.ndarray,
+    parameters: MF42Parameters,
+    population: MF42Population,
+    settings: MF42Settings,
+) -> np.ndarray | None:
+    x = np.asarray(seed, dtype=float).copy()
+    for _ in range(settings.max_iterations):
+        update, _ = mean_field_map_42(
+            x, parameters, population, settings, return_jacobian=False
+        )
+        error = float(np.max(np.abs(update - x)))
+        x = update
+        if error <= settings.residual_tolerance:
+            return x
+    return None
+
+
+def bimodality_and_mean_42(values: np.ndarray) -> tuple[float, float]:
+    """Finite-sample-corrected bimodality coefficient and mean opinion."""
+    values = np.asarray(values, dtype=float)
+    mean = float(np.mean(values))
+    if float(np.std(values)) <= 1.0e-12:
+        return 0.0, mean
+    g1 = float(skew(values, bias=False))
+    g2 = float(kurtosis(values, fisher=True, bias=False))
+    n = values.size
+    correction = 3.0 * (n - 1) ** 2 / ((n - 2) * (n - 3))
+    denominator = g2 + correction
+    if not np.isfinite(denominator) or denominator <= 0.0:
+        return float("nan"), mean
+    return float((g1**2 + 1.0) / denominator), mean
+
+
+def stable_attractors_42(
+    parameters: MF42Parameters,
+    continuation_seeds: list[np.ndarray] | None = None,
+    settings: MF42Settings = MF42_DEFAULTS,
+) -> list[dict[str, object]]:
+    """Find distinct stable fixed points by deterministic multistart iteration."""
+    pop = make_population_42(parameters.fs, settings)
+    seeds: list[np.ndarray] = []
+    for seed in (continuation_seeds or []) + seed_bank_42(settings):
+        _append_distinct_42(seeds, seed, 1.0e-10)
+
+    candidates: list[np.ndarray] = []
+    for seed in seeds:
+        solution = _iterate_seed_42(seed, parameters, pop, settings)
+        if solution is not None:
+            _append_distinct_42(candidates, solution, settings.solution_tolerance)
+
+    if np.isclose(settings.stubborn_positive_share, 0.5):
+        for solution in list(candidates):
+            reflected = reflect_state_42(solution)
+            update, _ = mean_field_map_42(
+                reflected, parameters, pop, settings, return_jacobian=False
+            )
+            if np.max(np.abs(update - reflected)) <= 5.0 * settings.residual_tolerance:
+                _append_distinct_42(candidates, reflected, settings.solution_tolerance)
+
+    stable: list[dict[str, object]] = []
+    for solution in candidates:
+        update, jacobian = mean_field_map_42(solution, parameters, pop, settings)
+        residual = float(np.max(np.abs(update - solution)))
+        eigenvalues = np.linalg.eigvals(jacobian)
+        spectral_radius = float(np.max(np.abs(eigenvalues)))
+        if residual > 5.0 * settings.residual_tolerance:
+            continue
+        if spectral_radius >= 1.0 - settings.stability_margin:
+            continue
+        b_value, s_value = bimodality_and_mean_42(solution[2:])
+        asymmetric = (
+            float(np.max(np.abs(reflect_state_42(solution) - solution))) > 2.0e-5
+        )
+        if b_value > settings.b_cutoff:
+            label = "Asymmetric bimodal" if asymmetric else "Symmetric bimodal"
+        else:
+            label = "Biased unimodal" if asymmetric else "Neutral unimodal"
+        stable.append(
+            {
+                "state": solution,
+                "B": b_value,
+                "S": s_value,
+                "label": label,
+                "residual": residual,
+                "spectral_radius": spectral_radius,
+            }
+        )
+    stable.sort(key=lambda item: (abs(float(item["S"])), float(item["B"])))
+    return stable
+
+
+def macroscopic_state_42(attractors: list[dict[str, object]]) -> str:
+    """Merge the four calculation labels into the three-state figure labels."""
+    labels = {str(item["label"]) for item in attractors}
+    has_bp = bool(labels & {"Symmetric bimodal", "Asymmetric bimodal"})
+    has_bu = "Biased unimodal" in labels
+    has_nu = "Neutral unimodal" in labels
+    if has_bp and has_bu:
+        return "BP-BU coexistence"
+    if has_bp and has_nu:
+        return "BP-NU coexistence"
+    if has_bu and has_nu:
+        return "BU-NU coexistence"
+    if has_bp:
+        return "Bimodal polarized"
+    if has_bu:
+        return "Biased unimodal"
+    if has_nu:
+        return "Neutral unimodal"
+    return "Undetected"
+
+
+def scan_plane_42(
+    plane: MF42Plane,
+    output_dir: Path | str = MF42_GENERATED_DIR,
+    settings: MF42Settings = MF42_DEFAULTS,
+) -> dict[str, object]:
+    """Scan one plane from the mean-field equation and save all attractors."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    points: dict[tuple[int, int], list[dict[str, object]]] = {}
+    grid_rows: list[dict[str, object]] = []
+    attractor_rows: list[dict[str, object]] = []
+    previous_row: dict[int, list[np.ndarray]] = {}
+
+    for iy, y_value in enumerate(plane.y_values):
+        previous_in_row: list[np.ndarray] = []
+        current_row: dict[int, list[np.ndarray]] = {}
+        for ix, x_value in enumerate(plane.x_values):
+            parameters = plane.parameters(x_value, y_value)
+            vertical = previous_row.get(ix, [])
+            attractors = stable_attractors_42(
+                parameters, previous_in_row + vertical, settings
+            )
+            points[(iy, ix)] = attractors
+            states = [np.asarray(item["state"]) for item in attractors]
+            previous_in_row = states
+            current_row[ix] = states
+            macro = macroscopic_state_42(attractors)
+            grid_rows.append(
+                {
+                    "x": x_value,
+                    "y": y_value,
+                    plane.x_parameter: x_value,
+                    plane.y_parameter: y_value,
+                    "state": macro,
+                    "stable_count": len(attractors),
+                }
+            )
+            for index, item in enumerate(attractors):
+                attractor_rows.append(
+                    {
+                        "x": x_value,
+                        "y": y_value,
+                        plane.x_parameter: x_value,
+                        plane.y_parameter: y_value,
+                        "attractor": index,
+                        "label": item["label"],
+                        "B": item["B"],
+                        "S": item["S"],
+                        "spectral_radius": item["spectral_radius"],
+                        "residual": item["residual"],
+                        "state_vector": json.dumps(
+                            np.asarray(item["state"], dtype=float).tolist()
+                        ),
+                    }
+                )
+        previous_row = current_row
+        print(
+            f"{plane.name}: completed row {iy + 1}/{len(plane.y_values)} "
+            f"({plane.y_parameter}={y_value:.4g})"
+        )
+
+    grid_path = output_dir / f"{plane.name}_grid.csv"
+    attractor_path = output_dir / f"{plane.name}_attractors.csv"
+    _write_dict_rows_42(grid_path, grid_rows)
+    _write_dict_rows_42(attractor_path, attractor_rows)
+    return {
+        "plane": plane,
+        "points": points,
+        "grid_rows": grid_rows,
+        "attractor_rows": attractor_rows,
+        "grid_path": grid_path,
+        "attractor_path": attractor_path,
+    }
+
+
+def _write_dict_rows_42(path: Path, rows: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        raise ValueError(f"No rows were generated for {path.name}.")
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _critical_multiplier_42(
+    state: np.ndarray,
+    parameters: MF42Parameters,
+    settings: MF42Settings,
+) -> tuple[float, np.ndarray]:
+    pop = make_population_42(parameters.fs, settings)
+    _, jacobian = mean_field_map_42(state, parameters, pop, settings)
+    eigenvalues, eigenvectors = np.linalg.eig(jacobian)
+    index = int(np.argmin(np.abs(eigenvalues - 1.0)))
+    return float(np.real(eigenvalues[index]) - 1.0), np.real(eigenvectors[:, index])
+
+
+def _pack_critical_42(state: np.ndarray, x_value: float, y_value: float) -> np.ndarray:
+    scale = np.sqrt(state.size)
+    return np.concatenate((state / scale, [x_value, y_value]))
+
+
+def _unpack_critical_42(vector: np.ndarray) -> tuple[np.ndarray, float, float]:
+    dimension = vector.size - 2
+    scale = np.sqrt(dimension)
+    return scale * vector[:dimension], float(vector[-2]), float(vector[-1])
+
+
+def _critical_residual_42(
+    vector: np.ndarray,
+    plane: MF42Plane,
+    settings: MF42Settings,
+) -> np.ndarray:
+    state, x_value, y_value = _unpack_critical_42(vector)
+    parameters = plane.parameters(x_value, y_value)
+    pop = make_population_42(parameters.fs, settings)
+    update, _ = mean_field_map_42(state, parameters, pop, settings)
+    critical, _ = _critical_multiplier_42(state, parameters, settings)
+    return np.concatenate((update - state, [critical]))
+
+
+def _finite_jacobian_42(function, vector: np.ndarray) -> np.ndarray:
+    base = function(vector)
+    answer = np.empty((base.size, vector.size))
+    for column in range(vector.size):
+        step = 2.0e-6 * max(1.0, abs(float(vector[column])))
+        plus = vector.copy()
+        minus = vector.copy()
+        plus[column] += step
+        minus[column] -= step
+        answer[:, column] = (function(plus) - function(minus)) / (2.0 * step)
+    return answer
+
+
+def _critical_event_42(
+    state: np.ndarray,
+    parameters: MF42Parameters,
+    settings: MF42Settings,
+) -> str:
+    symmetric = np.max(np.abs(reflect_state_42(state) - state)) < 2.0e-4
+    _, eigenvector = _critical_multiplier_42(state, parameters, settings)
+    reflected_vector = reflect_state_42(eigenvector)
+    odd_error = np.linalg.norm(reflected_vector + eigenvector)
+    even_error = np.linalg.norm(reflected_vector - eigenvector)
+    return "Pitchfork" if symmetric and odd_error < even_error else "Saddle-node"
+
+
+def _refine_critical_seed_42(
+    state: np.ndarray,
+    x_value: float,
+    y_value: float,
+    plane: MF42Plane,
+    settings: MF42Settings,
+) -> np.ndarray | None:
+    initial = _pack_critical_42(state, x_value, y_value)[:-1]
+
+    def residual(vector: np.ndarray) -> np.ndarray:
+        full = np.concatenate((vector, [y_value]))
+        return _critical_residual_42(full, plane, settings)
+
+    answer = least_squares(
+        residual,
+        initial,
+        xtol=2.0e-9,
+        ftol=2.0e-9,
+        gtol=2.0e-9,
+        max_nfev=250,
+    )
+    full = np.concatenate((answer.x, [y_value]))
+    if np.max(np.abs(residual(answer.x))) > 2.0e-5:
+        return None
+    _, refined_x, _ = _unpack_critical_42(full)
+    if not plane.x_values[0] - 0.03 <= refined_x <= plane.x_values[-1] + 0.03:
+        return None
+    return full
+
+
+def _candidate_critical_seeds_42(
+    scan: dict[str, object], settings: MF42Settings
+) -> list[np.ndarray]:
+    plane = scan["plane"]
+    points = scan["points"]
+    candidates: list[np.ndarray] = []
+    for iy, y_value in enumerate(plane.y_values):
+        for ix in range(len(plane.x_values) - 1):
+            left = points[(iy, ix)]
+            right = points[(iy, ix + 1)]
+            if macroscopic_state_42(left) == macroscopic_state_42(right):
+                continue
+            choices: list[tuple[dict[str, object], float]] = []
+            choices.extend((item, float(plane.x_values[ix])) for item in left)
+            choices.extend((item, float(plane.x_values[ix + 1])) for item in right)
+            if not choices:
+                continue
+            item, x_guess = max(
+                choices, key=lambda value: float(value[0]["spectral_radius"])
+            )
+            refined = _refine_critical_seed_42(
+                np.asarray(item["state"]), x_guess, float(y_value), plane, settings
+            )
+            if refined is None:
+                continue
+            _, x_refined, y_refined = _unpack_critical_42(refined)
+            if any(
+                np.hypot(x_refined - _unpack_critical_42(old)[1],
+                         y_refined - _unpack_critical_42(old)[2]) < 0.025
+                for old in candidates
+            ):
+                continue
+            candidates.append(refined)
+    return candidates
+
+
+def _trace_direction_42(
+    seed: np.ndarray,
+    direction: float,
+    plane: MF42Plane,
+    settings: MF42Settings,
+    step: float,
+    maximum_points: int,
+) -> list[np.ndarray]:
+    function = lambda vector: _critical_residual_42(vector, plane, settings)
+    curve = [seed.copy()]
+    previous_tangent: np.ndarray | None = None
+    current = seed.copy()
+    x_min, x_max = float(plane.x_values[0]), float(plane.x_values[-1])
+    y_min, y_max = float(plane.y_values[0]), float(plane.y_values[-1])
+    for _ in range(maximum_points - 1):
+        jacobian = _finite_jacobian_42(function, current)
+        _, _, right = np.linalg.svd(jacobian, full_matrices=True)
+        tangent = right[-1]
+        if previous_tangent is not None and np.dot(tangent, previous_tangent) < 0.0:
+            tangent = -tangent
+        elif previous_tangent is None:
+            tangent *= direction
+        tangent /= np.linalg.norm(tangent)
+        predictor = current + step * tangent
+
+        def augmented(vector: np.ndarray) -> np.ndarray:
+            return np.concatenate(
+                (function(vector), [np.dot(vector - predictor, tangent)])
+            )
+
+        answer = least_squares(
+            augmented,
+            predictor,
+            xtol=5.0e-9,
+            ftol=5.0e-9,
+            gtol=5.0e-9,
+            max_nfev=160,
+        )
+        if np.max(np.abs(augmented(answer.x))) > 4.0e-5:
+            break
+        current = answer.x
+        _, x_value, y_value = _unpack_critical_42(current)
+        if not (x_min - 0.03 <= x_value <= x_max + 0.03):
+            break
+        if not (y_min - 0.03 <= y_value <= y_max + 0.03):
+            break
+        curve.append(current.copy())
+        previous_tangent = tangent
+    return curve
+
+
+def continue_boundaries_42(
+    scan: dict[str, object],
+    output_dir: Path | str = MF42_GENERATED_DIR,
+    settings: MF42Settings = MF42_DEFAULTS,
+    maximum_curves: int = 12,
+) -> Path:
+    """Locate critical seeds and trace them with pseudo-arclength continuation."""
+    plane = scan["plane"]
+    seeds = _candidate_critical_seeds_42(scan, settings)[:maximum_curves]
+    rows: list[dict[str, object]] = []
+    step = 0.006 if plane.name != "panel_b_alpha2_dc" else 0.008
+    for curve_id, seed in enumerate(seeds):
+        backward = _trace_direction_42(seed, -1.0, plane, settings, step, 260)
+        forward = _trace_direction_42(seed, 1.0, plane, settings, step, 260)
+        curve = list(reversed(backward[1:])) + forward
+        for order, vector in enumerate(curve):
+            state, x_value, y_value = _unpack_critical_42(vector)
+            parameters = plane.parameters(x_value, y_value)
+            critical, _ = _critical_multiplier_42(state, parameters, settings)
+            b_value, s_value = bimodality_and_mean_42(state[2:])
+            rows.append(
+                {
+                    "curve_id": curve_id,
+                    "order": order,
+                    plane.x_parameter: x_value,
+                    plane.y_parameter: y_value,
+                    "event": _critical_event_42(state, parameters, settings),
+                    "critical_multiplier_minus_one": critical,
+                    "B": b_value,
+                    "S": s_value,
+                    "state_vector": json.dumps(state.tolist()),
+                }
+            )
+        print(f"{plane.name}: continued critical curve {curve_id + 1}/{len(seeds)}")
+    path = Path(output_dir) / f"{plane.name}_boundaries.csv"
+    if rows:
+        _write_dict_rows_42(path, rows)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("curve_id,order,event\n")
+    return path
+
+
+def plot_generated_plane_42(
+    plane: MF42Plane,
+    data_dir: Path | str = MF42_GENERATED_DIR,
+    figure_dir: Path | str = MF42_GENERATED_FIGURE_DIR,
+) -> Path:
+    """Plot a freshly calculated state grid and its continued boundaries."""
+    data_dir = Path(data_dir)
+    figure_dir = Path(figure_dir)
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    with (data_dir / f"{plane.name}_grid.csv").open() as handle:
+        grid_rows = list(csv.DictReader(handle))
+    state_order = [
+        "BP-BU coexistence",
+        "Biased unimodal",
+        "BP-NU coexistence",
+        "Bimodal polarized",
+        "Neutral unimodal",
+        "BU-NU coexistence",
+        "Undetected",
+    ]
+    colors = ["#ef9a9a", "#ffe08a", "#c9b9e8", "#9f89d0", "#9ec9ee",
+              "#2f5d8f", "#eeeeee"]
+    code = {name: index for index, name in enumerate(state_order)}
+    grid = np.full((len(plane.y_values), len(plane.x_values)), code["Undetected"])
+    x_index = {round(float(v), 12): i for i, v in enumerate(plane.x_values)}
+    y_index = {round(float(v), 12): i for i, v in enumerate(plane.y_values)}
+    for row in grid_rows:
+        ix = x_index[round(float(row[plane.x_parameter]), 12)]
+        iy = y_index[round(float(row[plane.y_parameter]), 12)]
+        grid[iy, ix] = code[row["state"]]
+
+    fig, ax = plt.subplots(figsize=(5.2, 4.7), dpi=180)
+    cmap = ListedColormap(colors)
+    ax.pcolormesh(
+        plane.x_values,
+        plane.y_values,
+        grid,
+        cmap=cmap,
+        vmin=-0.5,
+        vmax=len(colors) - 0.5,
+        shading="nearest",
+    )
+    boundary_path = data_dir / f"{plane.name}_boundaries.csv"
+    if boundary_path.is_file():
+        with boundary_path.open() as handle:
+            boundary_rows = list(csv.DictReader(handle))
+        grouped: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
+        for row in boundary_rows:
+            if row.get("event"):
+                grouped[(row["curve_id"], row["event"])].append(row)
+        for (_, event), rows in grouped.items():
+            rows.sort(key=lambda row: int(row["order"]))
+            color = SADDLE_COLOR if event == "Saddle-node" else PITCHFORK_COLOR
+            ax.plot(
+                [float(row[plane.x_parameter]) for row in rows],
+                [float(row[plane.y_parameter]) for row in rows],
+                color=color,
+                linewidth=1.7,
+                linestyle="--",
+            )
+    ax.set_xlabel({"alpha2": r"$\alpha_2$", "alpha3": r"$\alpha_3$"}[plane.x_parameter])
+    ax.set_ylabel({"fs": r"$f_s$", "dc": r"$d_c$"}[plane.y_parameter])
+    ax.set_xlim(float(plane.x_values[0]), float(plane.x_values[-1]))
+    ax.set_ylim(float(plane.y_values[0]), float(plane.y_values[-1]))
+    ax.grid(linestyle=":", alpha=0.22)
+    ax.spines[["top", "right"]].set_visible(False)
+    handles = [Patch(facecolor=colors[i], edgecolor="black", label=name)
+               for i, name in enumerate(state_order[:-1])]
+    ax.legend(handles=handles, fontsize=7.1, ncol=2, frameon=False,
+              loc="upper center", bbox_to_anchor=(0.5, -0.15))
+    fig.tight_layout()
+    path = figure_dir / f"{plane.name}.png"
+    fig.savefig(path, dpi=350, bbox_inches="tight")
+    fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def recompute_all_42bin(
+    output_dir: Path | str = MF42_GENERATED_DIR,
+    figure_dir: Path | str = MF42_GENERATED_FIGURE_DIR,
+    quick: bool = False,
+    trace_boundaries: bool = True,
+    settings: MF42Settings = MF42_DEFAULTS,
+) -> list[dict[str, Path]]:
+    """Recompute all three 42-bin parameter planes from the model equations."""
+    results: list[dict[str, Path]] = []
+    for plane in manuscript_planes_42bin(quick=quick):
+        scan = scan_plane_42(plane, output_dir, settings)
+        boundary_path = Path(output_dir) / f"{plane.name}_boundaries.csv"
+        if trace_boundaries:
+            boundary_path = continue_boundaries_42(
+                scan,
+                output_dir,
+                settings,
+                maximum_curves=2 if quick else 12,
+            )
+        figure_path = plot_generated_plane_42(plane, output_dir, figure_dir)
+        results.append(
+            {
+                "grid": Path(scan["grid_path"]),
+                "attractors": Path(scan["attractor_path"]),
+                "boundaries": boundary_path,
+                "figure": figure_path,
+            }
+        )
+    return results
+
+
+def _command_line_42bin() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="42-bin mean-field calculation")
+    parser.add_argument(
+        "--recompute", action="store_true",
+        help="calculate the three parameter planes from the equations",
+    )
+    parser.add_argument(
+        "--quick", action="store_true",
+        help="use a 5 x 5 test grid instead of the manuscript grids",
+    )
+    parser.add_argument(
+        "--no-continuation", action="store_true",
+        help="skip pseudo-arclength continuation",
+    )
+    args = parser.parse_args()
+    if args.recompute:
+        recompute_all_42bin(
+            quick=args.quick,
+            trace_boundaries=not args.no_continuation,
+        )
+    else:
+        check_data()
+        print("All archived 42-bin manuscript data are present.")
+
+
+if __name__ == "__main__":
+    _command_line_42bin()
