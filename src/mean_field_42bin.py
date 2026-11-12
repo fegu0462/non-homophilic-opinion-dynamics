@@ -7,7 +7,7 @@ Panels
 (c) (alpha3, fs), at dc=0.5 and alpha2=0.
 
 For immediate reproduction, the archived numerical scan and pseudo-arclength
-continuation data in ``data/recomputed_exact`` can be plotted directly.  The
+continuation data in ``data`` can be plotted directly.  The
 same module also contains the complete from-scratch route: the 42-dimensional
 mean-field equation, multistart fixed-point scan, analytic stability test,
 state classification, and pseudo-arclength continuation.
@@ -98,7 +98,7 @@ from scipy.stats import kurtosis, skew
 ROOT = Path(__file__).resolve().parents[1]
 
 
-DATA_DIR = ROOT / "data" / "recomputed_exact"
+DATA_DIR = ROOT / "data"
 
 
 FIGURE_DIR = ROOT / "figures"
