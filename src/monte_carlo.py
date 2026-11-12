@@ -213,7 +213,7 @@ def _simulate(alpha2, parameters, initial_state, sample_all=False):
         "total_mean": total_mean,
         "final_opinions": final,
         "B": bimodality_coefficient(final),
-        "S": float(np.mean(final)),
+        "S": float(abs(np.mean(final))),
     }
 
 
