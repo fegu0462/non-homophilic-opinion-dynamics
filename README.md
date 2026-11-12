@@ -1,7 +1,6 @@
-# Non-homophilic opinion dynamics
+# Selected code and data for Mean-filed approximation and Monte Carlo simulations
 
-This repository contains the code and data used in our study of collective
-opinion dynamics with non-homophilic interactions.
+This repository contains the code and data used in our study of Non-homophilic interactions and phase transitions in opinion dynamics.
 
 The source Python code is provided in `src/`. The five Jupyter notebooks in
 `notebooks/` reproduce the Monte Carlo trajectories, the four-bin mean-field
