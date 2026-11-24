@@ -7,7 +7,7 @@ The source Python code is provided in `src/`. The five Jupyter notebooks in
 bifurcation slices, and the 42-bin mean-field parameter-plane diagrams.
 Precomputed data used for the 42-bin figures are provided in `data/`; the same
 data can also be recomputed from the model equations using
-`src/mean_field_42bin.py`. Generated figures are written to `figures/`.
+`src/mean_field_42bin.py`. 
 
 Python 3.9 or later is recommended. Install the required packages with
 
